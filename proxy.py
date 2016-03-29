@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import socket, select, time, requests
+import socket, select, time, requests, random, string
 
 class Fuzzer:
     def __init__(self, url, query_arguments, method):
@@ -8,11 +8,53 @@ class Fuzzer:
         self.query_arguments = query_arguments
         self.method = method
         self.session = requests.Session()
+        self.load_vectors()
+
+    def load_vectors(self):
+        # Placeholder. Make loading from file later
+        self.mirror_vectors = {"HTMLi":"<s>Test</s>","XSS":"<script>alert(1)</script>", "Another XSS":"\"alert(1)"}
+
     def fuzz(self):
-        req = requests.Request(self.method, self.url, self.query_arguments)
-        prepped = req.prepare()
-        resp = self.session.send(prepped)
-        print "Server status code: %d" % (resp.status_code)
+        to_fuzz = []
+        print self.query_arguments
+        for k,v in self.query_arguments.iteritems():
+            if v == "*":
+                to_fuzz.append(k)
+        print "To fuzz: ", to_fuzz
+        
+        #Generating couple of random strings
+        fuzz_strings = []
+        for i in range(3):
+            fuzz_strings.append(''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(i)))        
+        original_resp = self.send(self.query_arguments)
+        print "Original status code: %d" % (original_resp.status_code)
+        for param in to_fuzz:
+            fuzz_query_arguments = self.query_arguments
+            for fuzz_str in fuzz_strings:
+                print fuzz_str
+                fuzz_query_arguments[param] = fuzz_str
+                resp = self.send(fuzz_query_arguments)
+                if resp.status_code != original_resp.status_code:
+                    print "BOOM! Different answer at \"%s\" string" % (fuzz_str)
+         #Testing mirror vectors
+            for vector in self.mirror_vectors.keys():
+                fuzz_query_arguments[param] = self.mirror_vectors[vector]
+                resp = self.send(fuzz_query_arguments)
+                if string.find(resp.text, self.mirror_vectors[vector]) != -1:
+                    print "BOOM! Argument %s vulnerable to %s attack with %s vector" % (param, vector, self.mirror_vectors[vector])
+         #Testing special characters
+            for spec_char in range(37):
+                fuzz_query_arguments[param] = chr(spec_char)
+                resp = self.send(fuzz_query_arguments)
+                if resp.status_code != original_resp.status_code:
+                    print "BOOM! Different answer at %d special char" % (resp.status_code)
+
+    def send(self, query_arguments):
+        if self.method == "POST":
+            req = requests.post(self.url, data = query_arguments)
+        elif self.method == "GET":
+            req = requests.get(self.url, params = query_arguments)            
+        return req
             
         
 
@@ -37,7 +79,7 @@ class HTTP_Parser:
 #            print "Line: " + i        
         self.method, self.host, self.http_version = lines[0].split(" ")
         if self.host[1].isdigit():
-            print "RESPONSE"
+            print "RESPONSE. Do not proceed"
             return            
         self.host, self.query = self.host.split("?") if "?" in self.host else (self.host, None)
         self.uri = self.host
@@ -52,10 +94,12 @@ class HTTP_Parser:
             print "Query: %s" % (self.query)
             self.query_arguments = self.parse_query(self.query)
             print "Query arguments: ", self.query_arguments
+            fuzz = Fuzzer(self.uri, self.query_arguments, self.method).fuzz()
         if len(lines[-1])>0:
             self.data_query = lines[-1]
             print "Data: %s" % self.data_query
             self.data_query_arguments = self.parse_query(self.data_query)
+            fuzz = Fuzzer(self.uri, self.data_query_arguments, self.method).fuzz()
         print "============================================"
  
     def parse_query(self, query):
@@ -103,12 +147,6 @@ class Proxy:
         if data:
             parser = HTTP_Parser(data)
             parser.parse()
-            if parser.query is not None:
-                query_arguments = parser.query_arguments
-                fuzzer = Fuzzer(parser.uri, query_arguments, parser.method).fuzz() 
-            elif parser.data_query is not None:
-                query_arguments = parser.data_query_arguments
-                fuzzer = Fuzzer(parser.uri, query_arguments, parser.method).fuzz()
         self.channel[self.s].send(data)
 
 
